@@ -126,6 +126,32 @@ go run mage.go buildCaddy
 curl -i localhost:8080/
 ```
 
+## Metrics
+
+When Caddy's [`metrics`](https://caddyserver.com/docs/metrics) global option is enabled, coraza-caddy exposes Prometheus metrics on Caddy's `/metrics` endpoint alongside Caddy's built-in metrics.
+
+```caddy
+{
+    order coraza_waf first
+    metrics
+}
+```
+
+### Exposed metrics
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `coraza_waf_requests_total` | Counter | `method`, `host` | Total requests processed by the WAF |
+| `coraza_waf_requests_blocked_total` | Counter | `method`, `action` | Requests blocked by the WAF |
+| `coraza_waf_rules_triggered_total` | Counter | `severity` | Individual WAF rules triggered |
+
+### Label values
+
+- **`method`**: HTTP method (GET, POST, etc.)
+- **`host`**: Server name from the Host header (port stripped)
+- **`action`**: Interruption action (`deny`, `drop`, `redirect`)
+- **`severity`**: Rule severity (`emergency`, `alert`, `critical`, `error`, `warning`, `notice`, `info`, `debug`)
+
 ## Respond with custom message or HTML page
 
 In order to respond with a custom message or HTML page, you can take advantage of [handle_errors](https://caddyserver.com/docs/caddyfile/directives/handle_errors) directive:

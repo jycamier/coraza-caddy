@@ -21,6 +21,7 @@ import (
 	"github.com/corazawaf/coraza/v3/types"
 	"github.com/jcchavezs/mergefs"
 	"github.com/jcchavezs/mergefs/io"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
@@ -57,6 +58,7 @@ type corazaModule struct {
 	logger  *zap.Logger
 	waf     coraza.WAF
 	poolKey string
+	metrics *metricsRegistry
 }
 
 // CaddyModule returns the Caddy module information.
@@ -72,8 +74,10 @@ func (m *corazaModule) Provision(ctx caddy.Context) error {
 	m.logger = ctx.Logger(m)
 	m.poolKey = m.computePoolKey()
 
+	m.metrics = newMetricsRegistry(ctx.GetMetricsRegistry())
+
 	val, loaded, err := wafPool.LoadOrNew(m.poolKey, func() (caddy.Destructor, error) {
-		waf, err := m.buildWAF()
+		waf, err := m.buildWAF(m.metrics)
 		if err != nil {
 			return nil, err
 		}
@@ -91,9 +95,9 @@ func (m *corazaModule) Provision(ctx caddy.Context) error {
 }
 
 // buildWAF creates a new coraza.WAF from the module's configuration.
-func (m *corazaModule) buildWAF() (coraza.WAF, error) {
+func (m *corazaModule) buildWAF(metrics *metricsRegistry) (coraza.WAF, error) {
 	config := coraza.NewWAFConfig().
-		WithErrorCallback(newErrorCb(m.logger)).
+		WithErrorCallback(newErrorCb(m.logger, metrics)).
 		WithDebugLogger(newLogger(m.logger))
 
 	if m.LoadOWASPCRS {
@@ -182,6 +186,11 @@ func (m corazaModule) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 	repl := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
 	repl.Set("http.transaction_id", id)
 
+	m.metrics.requestsTotal.With(prometheus.Labels{
+		"method": r.Method,
+		"host":   parseServerName(r.Host),
+	}).Inc()
+
 	// ProcessRequest is just a wrapper around ProcessConnection, ProcessURI,
 	// ProcessRequestHeaders and ProcessRequestBody.
 	// It fails if any of these functions returns an error and it stops on interruption.
@@ -198,6 +207,10 @@ func (m corazaModule) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 			zap.String("client_ip", r.RemoteAddr),
 			zap.String("unique_id", tx.ID()),
 		)
+		m.metrics.requestsBlocked.With(prometheus.Labels{
+			"method": r.Method,
+			"action": it.Action,
+		}).Inc()
 		return caddyhttp.HandlerError{
 			StatusCode: obtainStatusCodeFromInterruptionOrDefault(it, http.StatusOK),
 			ID:         tx.ID(),
@@ -212,7 +225,16 @@ func (m corazaModule) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 		return err
 	}
 
-	return processResponse(tx, r)
+	if err := processResponse(tx, r); err != nil {
+		if tx.IsInterrupted() {
+			m.metrics.requestsBlocked.With(prometheus.Labels{
+				"method": r.Method,
+				"action": "deny",
+			}).Inc()
+		}
+		return err
+	}
+	return nil
 }
 
 // Unmarshal Caddyfile implements caddyfile.Unmarshaler.
@@ -262,8 +284,12 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 	return m, err
 }
 
-func newErrorCb(logger *zap.Logger) func(types.MatchedRule) {
+func newErrorCb(logger *zap.Logger, metrics *metricsRegistry) func(types.MatchedRule) {
 	return func(mr types.MatchedRule) {
+		metrics.rulesTriggered.With(prometheus.Labels{
+			"severity": mr.Rule().Severity().String(),
+		}).Inc()
+
 		logMsg := mr.ErrorLog()
 		switch mr.Rule().Severity() {
 		case types.RuleSeverityEmergency,

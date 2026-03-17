@@ -22,6 +22,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddytest"
 	corazaWAF "github.com/corazawaf/coraza/v3"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -300,13 +301,15 @@ func TestNewErrorCb(t *testing.T) {
 		{"debug", 7, zapcore.DebugLevel},
 	}
 
+	metrics := newMetricsRegistry(prometheus.NewPedanticRegistry())
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			core, logs := observer.New(zapcore.DebugLevel)
 
 			waf, err := corazaWAF.NewWAF(
 				corazaWAF.NewWAFConfig().
-					WithErrorCallback(newErrorCb(zap.New(core))).
+					WithErrorCallback(newErrorCb(zap.New(core), metrics)).
 					WithDirectives(fmt.Sprintf(
 						`SecRuleEngine On
 						SecRule REQUEST_URI "/trigger" "id:1,phase:1,pass,log,severity:%d"`,
